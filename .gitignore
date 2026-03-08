@@ -1,0 +1,16 @@
+# 忽略 Python 缓存文件
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 忽略虚拟环境文件夹 (根据你自己的虚拟环境名字，通常是 venv, env 或 .venv)
+venv/
+env/
+.venv/
+Scripts/
+Lib/
+Include/
+pyvenv.cfg
+
+# 忽略 PyCharm 的配置文件
+.idea/
