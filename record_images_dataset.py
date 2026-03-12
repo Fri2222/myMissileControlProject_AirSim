@@ -13,25 +13,23 @@ RECORD_RATE = 0.0167  # 0.0167s ≈ 60 FPS
 SAVE_DIR = "H:/Missile_Video_Dataset"
 CAMERA_NAME = "0"
 
-# --- 🎥 彻底固定的死机位配置 ---
-# 1. 摄像机的物理位置 (退后 20 米，向右偏 20 米，升空 10 米)
-# 这样能形成一个完美的“侧后方俯视”视角，不仅能看清起点，还能拍到导弹飞出去的过程
-FIXED_CAMERA_POS = airsim.Vector3r(-20.0, 20.0, -10.0)
-
-# 2. 摄像机永久盯住的目标点 (死死盯住导弹的初始起点)
-# 你的导弹起点是在 (0, 0, -2)
-FIXED_LOOK_AT_POS = airsim.Vector3r(0.0, 0.0, -2.0)
+# 🎥 固定机位配置
+FIXED_CAMERA_POS = airsim.Vector3r(50.0, 30.0, 0.0)
 
 
 # ===============================================
 
 def setup_dataset(client):
-    """初始化目录、CSV和视频"""
+    """初始化目录、CSV和图片文件夹"""
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    current_dir = os.path.join(SAVE_DIR, f"VideoData_FixedView_{timestamp}")
-    if not os.path.exists(current_dir):
-        os.makedirs(current_dir)
-        print(f"📂 数据集目录已创建: {current_dir}")
+    # 为了区分，文件夹名字改叫 ImageData
+    current_dir = os.path.join(SAVE_DIR, f"ImageData_FixedView_{timestamp}")
+    os.makedirs(current_dir, exist_ok=True)
+
+    # 🌟 核心修改：创建专门存放照片的 images 文件夹
+    images_dir = os.path.join(current_dir, "images")
+    os.makedirs(images_dir, exist_ok=True)
+    print(f"📂 数据集目录已创建: {current_dir}")
 
     csv_path = os.path.join(current_dir, "ground_truth.csv")
     csv_file = open(csv_path, 'w', newline='')
@@ -39,52 +37,28 @@ def setup_dataset(client):
     header = ["frame_id", "timestamp", "pos_x", "pos_y", "pos_z", "ort_w", "ort_x", "ort_y", "ort_z"]
     writer.writerow(header)
 
-    print("正在获取相机分辨率...")
-    responses = client.simGetImages([airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Scene, False, False)])
-    if not responses or responses[0].width == 0:
-        raise Exception("无法获取图像！请检查UE4。")
-
-    img_width = responses[0].width
-    img_height = responses[0].height
-    fps = int(1 / RECORD_RATE)
-    print(f"📷 录制分辨率: {img_width} x {img_height} @ {fps} FPS")
-
-    # 修复了原来重复初始化 VideoWriter 的小 Bug
-    video_path = os.path.join(current_dir, "flight_video.mp4")
-    video_writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (img_width, img_height))
-
-    return csv_file, writer, video_writer, current_dir
+    return csv_file, writer, current_dir, images_dir
 
 
 def process_airsim_image(response):
-    """
-    处理 AirSim 图像，并确保内存连续性以防 OpenCV 拒收
-    """
+    """处理 AirSim 图像，确保内存连续性"""
     img1d = np.frombuffer(response.image_data_uint8, dtype=np.uint8)
-
     try:
         img_bgr = img1d.reshape(response.height, response.width, 3)
     except ValueError:
-        # 如果是 4 通道 BGRA
         img_bgra = img1d.reshape(response.height, response.width, 4)
-        img_bgr = img_bgra[:, :, :3].copy()  # 强制开辟连续内存
-
+        img_bgr = img_bgra[:, :, :3].copy()
     return np.ascontiguousarray(img_bgr)
 
 
 def calculate_look_at_quaternion(cam_pos, target_pos):
-    """
-    数学核心：计算让 A 点看向 B 点所需的旋转四元数 (Pan/Tilt)
-    """
+    """计算相机盯着导弹所需的旋转四元数"""
     dx = target_pos.x_val - cam_pos.x_val
     dy = target_pos.y_val - cam_pos.y_val
     dz = target_pos.z_val - cam_pos.z_val
-
     yaw = math.atan2(dy, dx)
     distance_xy = math.sqrt(dx * dx + dy * dy)
-    pitch = math.atan2(dz, distance_xy)
-    pitch = -pitch
-
+    pitch = -math.atan2(dz, distance_xy)
     return airsim.to_quaternion(pitch, 0, yaw)
 
 
@@ -92,25 +66,19 @@ def main():
     client = airsim.VehicleClient()
     try:
         client.confirmConnection()
-        print(f"✅ AirSim 连接成功 | 模式：完全静态死机位 | 帧率：60 FPS")
+        print(f"✅ AirSim 连接成功 | 模式：图片序列保存")
     except Exception as e:
         print(f"❌ 连接失败: {e}")
         return
 
-    csv_f, writer, v_writer, path = None, None, None, None
+    csv_f, writer, path, images_dir = None, None, None, None
     try:
-        csv_f, writer, v_writer, path = setup_dataset(client)
+        csv_f, writer, path, images_dir = setup_dataset(client)
     except Exception as e:
         print(f"❌ 初始化失败: {e}")
         return
 
-    # 💥 【核心修改区域】：在录制开始前，一次性把相机“锁死”在固定位置和角度
-    print("🔒 正在锁定摄像机机位...")
-    fixed_rotation = calculate_look_at_quaternion(FIXED_CAMERA_POS, FIXED_LOOK_AT_POS)
-    client.simSetVehiclePose(airsim.Pose(FIXED_CAMERA_POS, fixed_rotation), True)
-
     print(f"🔴 录制开始... (按 Ctrl+C 停止)")
-
     start_time = time.time()
     frame_id = 0
 
@@ -118,21 +86,24 @@ def main():
         while True:
             loop_start = time.time()
 
-            # 1. 获取导弹真值 (仅仅用来写 CSV，不再影响相机)
+            # 1. 获取导弹真值并控制相机视角
             pose = client.simGetObjectPose(MISSILE_NAME)
+            target_look_rotation = calculate_look_at_quaternion(FIXED_CAMERA_POS, pose.position)
+            client.simSetVehiclePose(airsim.Pose(FIXED_CAMERA_POS, target_look_rotation), True)
 
-            # 2. 拍照 (相机已经在循环外被固定，所以这里直接拍)
+            # 2. 拍照
             responses = client.simGetImages([airsim.ImageRequest(CAMERA_NAME, airsim.ImageType.Scene, False, False)])
             current_timestamp = time.time() - start_time
             img_response = responses[0]
 
             if img_response.width == 0: continue
-
-            # 3. 写入视频数据
             frame_bgr = process_airsim_image(img_response)
-            v_writer.write(frame_bgr)
 
-            # 4. 写入 CSV 坐标数据
+            # 3. 🌟 核心修改：直接保存为清晰的 JPG 图片 (六位数字补零格式，如 000005.jpg)
+            img_path = os.path.join(images_dir, f"{frame_id:06d}.jpg")
+            cv2.imwrite(img_path, frame_bgr)
+
+            # 4. 写入 CSV 真值
             pos = pose.position
             ort = pose.orientation
             row = [
@@ -142,13 +113,12 @@ def main():
             ]
             writer.writerow(row)
 
-            # 每10帧刷新一次打印，减少IO消耗提高性能
             if frame_id % 10 == 0:
-                print(f"🎥 Frame: {frame_id} | FPS: {1 / (time.time() - loop_start):.1f} | T: {current_timestamp:.2f}s",
-                      end='\r')
+                print(
+                    f"📸 已存图片: {frame_id} | FPS: {1 / (time.time() - loop_start):.1f} | T: {current_timestamp:.2f}s",
+                    end='\r')
 
             frame_id += 1
-
             elapsed = time.time() - loop_start
             sleep_time = RECORD_RATE - elapsed
             if sleep_time > 0:
@@ -160,16 +130,12 @@ def main():
         print(f"\n❌ 错误: {e}")
     finally:
         if csv_f: csv_f.close()
-        if v_writer: v_writer.release()
-
         try:
             client.reset()
             client.enableApiControl(False)
-            print("🔌 已断开与 AirSim 的连接。")
         except:
             pass
-
-        print(f"💾 视频保存完毕: {path}")
+        print(f"💾 图片序列保存完毕: {path}")
 
 
 if __name__ == "__main__":
