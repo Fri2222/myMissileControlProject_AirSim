@@ -1,5 +1,7 @@
 import airsim
 import numpy as np
+import math
+import random
 from scipy.spatial.transform import Rotation as R
 
 
@@ -11,15 +13,31 @@ class MissileController:
         self.target_pos = np.array(target_pos)
         self.end_pos = np.array(end_pos)
 
-        # 核心数学：反向推导二阶贝塞尔控制点，确保 t=0.5 时精确穿过 target_pos
+        # 1. 基础轨迹控制点：反向推导二阶贝塞尔，确保中间时刻穿过 target_pos
         self.control_point = 2 * self.target_pos - 0.5 * self.start_pos - 0.5 * self.end_pos
 
-    def _calculate_bezier_point(self, t):
-        """计算二阶贝塞尔曲线上的点"""
-        return (1 - t) ** 2 * self.start_pos + 2 * (1 - t) * t * self.control_point + t ** 2 * self.end_pos
+        # ================== 🎲 随机机动生成器 ==================
+        # 每次实例化导弹时，都会随机生成一套全新的飞行机动参数
+
+        # 2. 变速参数 (时间扭曲 Time Warping)
+        self.time_warp_amp = random.uniform(-0.15, 0.15)
+
+        # 3. 变向参数 (空间蛇形走位 Swerving)
+        self.wobble_amp1 = np.array([random.uniform(-10, 10), random.uniform(-10, 10), random.uniform(-5, 5)])
+        self.wobble_amp2 = np.array([random.uniform(-4, 4), random.uniform(-4, 4), random.uniform(-2, 2)])
+
+        print(
+            f"🎲 [轨迹生成] 变速因子: {self.time_warp_amp:.2f} | 最大变向机动: {np.linalg.norm(self.wobble_amp1):.1f}m")
+
+    def _calculate_actual_pos(self, p):
+        """核心数学引擎：包含时间扭曲(加减速)和空间偏移(变向)的复合轨迹"""
+        t = p + self.time_warp_amp * math.sin(2 * math.pi * p)
+        base_pos = (1 - t) ** 2 * self.start_pos + 2 * (1 - t) * t * self.control_point + t ** 2 * self.end_pos
+        offset = self.wobble_amp1 * math.sin(2 * math.pi * p) + self.wobble_amp2 * math.sin(4 * math.pi * p)
+        return base_pos + offset
 
     def _get_rotation_from_velocity(self, velocity):
-        """让导弹头始终朝向飞行方向"""
+        """让导弹头始终朝向飞行(机动)的瞬时方向"""
         norm = np.linalg.norm(velocity)
         if norm < 1e-6:
             return airsim.Quaternionr(0, 0, 0, 1)
@@ -29,19 +47,15 @@ class MissileController:
         quat = rot.as_quat()
         return airsim.Quaternionr(quat[0], quat[1], quat[2], quat[3])
 
-    def update_pose(self, progress_t):
-        """
-        根据进度 t (0.0 到 1.0) 更新导弹位置并返回当前 pose
-        """
-        # 计算当前帧和下一帧的位置（用于算朝向）
-        current_pos = self._calculate_bezier_point(progress_t)
-        next_t = min(progress_t + 0.01, 1.0)
-        next_pos = self._calculate_bezier_point(next_t)
+    def update_pose(self, progress_p):
+        """根据进度 p (0.0 到 1.0) 更新导弹位置并返回当前 pose"""
+        current_pos = self._calculate_actual_pos(progress_p)
+        next_p = min(progress_p + 0.01, 1.0)
+        next_pos = self._calculate_actual_pos(next_p)
 
         velocity = next_pos - current_pos
         orientation = self._get_rotation_from_velocity(velocity)
 
-        # 组合 Pose 并发送给 UE4
         pose = airsim.Pose(
             airsim.Vector3r(current_pos[0], current_pos[1], current_pos[2]),
             orientation

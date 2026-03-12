@@ -60,6 +60,7 @@ class CameraRecorder:
 
         print(f"📷 录像已准备就绪: {img_width}x{img_height} @ {self.fps}FPS -> {video_path}")
 
+        return video_path
     def record_frame(self, frame_id, current_time, missile_pose):
         """抓取一帧并记录"""
         responses = self.client.simGetImages(
