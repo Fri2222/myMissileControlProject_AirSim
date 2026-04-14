@@ -3,18 +3,24 @@ import time
 from trajectory_control import MissileController
 from camera_control import CameraRecorder
 
-# ================= ⚙️ 全局核心配置 =================
-MISSILE_NAME = "Missile_1"
+# ================= ⚙️ 蜂群(多导弹)全局配置 =================
 SAVE_DIR = "H:/Missile_Video_Dataset"
 
 TOTAL_FRAMES = 180  # 总帧数 (录制 3 秒)
-RECORD_RATE = 0.0167  # 帧间隔 ≈ 60 FPS
+RECORD_RATE = 0.0167  # ≈ 60 FPS
 
-# --- 🚀 坐标体系配置 (X前, Y右, Z下(负代表天空)) ---
-# 1. 导弹飞行轨迹规划
-START_POS = [0, 0, -2]  # 起点
-SHARED_TARGET_POS = [50, 10, -30]  # 🎯 核心交汇点：导弹必定穿过此点，相机死死盯住此点！
-END_POS = [150, 0, -50]  # 终点
+# 🎯 核心交汇点：所有导弹都必须在 t=0.5 时穿过这个死机位中心点！
+SHARED_TARGET_POS = [50, 10, -30]
+
+# 🚀 定义多枚导弹的阵列参数 (名字必须与 UE4 世界大纲完全一致)
+MISSILES_CONFIG = [
+    # 导弹1：从正后方底层发射，飞向右上角
+    {"name": "Missile_1", "start": [0, -15, -2], "end": [150, 20, -60]},
+    # 导弹2：从正中心高层发射，直奔远方
+    {"name": "Missile_2", "start": [0, 0, -10], "end": [150, 0, -50]},
+    # 导弹3：从正后方右侧底层发射，飞向左上角
+    {"name": "Missile_3", "start": [0, 15, -2], "end": [150, -20, -40]}
+]
 
 # 2. 摄像机固定机位 (位于起点侧后方)
 FIXED_CAMERA_POS = [-20, 20, -10]
@@ -27,13 +33,18 @@ def main():
     client = airsim.VehicleClient()
     client.confirmConnection()
 
-    missile_ctrl = MissileController(
-        client=client,
-        missile_name=MISSILE_NAME,
-        start_pos=START_POS,
-        target_pos=SHARED_TARGET_POS,
-        end_pos=END_POS
-    )
+    # 1. 批量初始化所有的导弹控制器
+    missile_controllers = []
+    for cfg in MISSILES_CONFIG:
+        ctrl = MissileController(
+            client=client,
+            missile_name=cfg["name"],
+            start_pos=cfg["start"],
+            target_pos=SHARED_TARGET_POS,
+            end_pos=cfg["end"]
+        )
+        missile_controllers.append(ctrl)
+        print(f"✅ 成功挂载导弹: {cfg['name']}")
 
     camera_rec = CameraRecorder(
         client=client,
@@ -44,13 +55,12 @@ def main():
         look_at_pos=SHARED_TARGET_POS
     )
 
-    # 声明一个变量用来存视频地址
     final_video_path = ""
 
     try:
-        # 👇 接收录像模块传回来的视频完整路径
+        # 2. 启动录像环境
         final_video_path = camera_rec.setup()
-        print("🚀 导弹发射，蛇形机动同步录制中...")
+        print("🚀 蜂群导弹发射，多目标轨迹同步录制中...")
 
         start_time = time.time()
 
@@ -58,10 +68,17 @@ def main():
             loop_start = time.time()
             progress_t = frame_id / (TOTAL_FRAMES - 1)
 
-            current_pose = missile_ctrl.update_pose(progress_t)
+            # 👉 核心变更：同时更新所有导弹的位置
+            # 由于底层自带随机的“蛇形机动”和“变速”，它们即使起点终点相近，飞行姿态也完全不同
+            current_poses = []
+            for ctrl in missile_controllers:
+                pose = ctrl.update_pose(progress_t)
+                current_poses.append(pose)
 
+            # 这里我们只取 Missile_1 的坐标录入 CSV 真值作为演示
+            # (如果你需要记录所有导弹，可以修改 Camera 模块的 CSV 写入逻辑)
             current_time = time.time() - start_time
-            camera_rec.record_frame(frame_id, current_time, current_pose)
+            camera_rec.record_frame(frame_id, current_time, current_poses[0])
 
             if frame_id % 15 == 0:
                 print(f"▶️ 进度: {progress_t * 100:.1f}% | 帧: {frame_id}/{TOTAL_FRAMES} | 耗时: {current_time:.2f}s")
@@ -71,7 +88,7 @@ def main():
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
-        print("🎯 导弹抵达终点，任务完成！")
+        print("🎯 所有导弹抵达终点，任务完成！")
 
     except KeyboardInterrupt:
         print("\n🛑 用户手动中止。")
@@ -79,10 +96,9 @@ def main():
         if 'camera_rec' in locals():
             camera_rec.close()
 
-        # 👇 在所有任务结束后，高亮打印视频的绝对路径！
         if final_video_path:
             print("-" * 50)
-            print(f"🎬 杀青！本次大片已保存至:\n👉 {final_video_path}")
+            print(f"🎬 多目标大片杀青！已保存至:\n👉 {final_video_path}")
             print("-" * 50)
 
         print("🔌 仿真环境已断开连接。")
