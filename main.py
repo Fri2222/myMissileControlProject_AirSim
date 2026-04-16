@@ -22,8 +22,11 @@ MISSILES_CONFIG = [
     {"name": "Missile_3", "start": [0, 15, -2], "end": [150, -20, -40]}
 ]
 
-# 2. 摄像机固定机位 (位于起点侧后方)
-FIXED_CAMERA_POS = [-20, 20, -10]
+# 2. 摄像机固定机位 (将 X 设为 50，与 SHARED_TARGET_POS 的 X 坐标对齐)
+# X=50: 实现正侧面视角
+# Y=80: 将相机横向拉远（目标 Y 是 10，这里 Y=80 意味着距离 70 米），视野更开阔
+# Z=-30: 将相机高度调至与目标点等高，获得平视效果
+FIXED_CAMERA_POS = [50, 80, -30]
 
 
 # =================================================
@@ -68,17 +71,18 @@ def main():
             loop_start = time.time()
             progress_t = frame_id / (TOTAL_FRAMES - 1)
 
-            # 👉 核心变更：同时更新所有导弹的位置
-            # 由于底层自带随机的“蛇形机动”和“变速”，它们即使起点终点相近，飞行姿态也完全不同
-            current_poses = []
+            # 👉 核心变更：用字典收集所有导弹的状态，并提取数字 ID
+            current_poses = {}
             for ctrl in missile_controllers:
                 pose = ctrl.update_pose(progress_t)
-                current_poses.append(pose)
 
-            # 这里我们只取 Missile_1 的坐标录入 CSV 真值作为演示
-            # (如果你需要记录所有导弹，可以修改 Camera 模块的 CSV 写入逻辑)
+                # 自动从 "Missile_1" 这种名字中提取数字 "1" 作为 MOT 标准的 track_id
+                track_id = ctrl.missile_name.split('_')[-1]
+                current_poses[track_id] = pose
+
+            # 将包含了所有导弹位置和 ID 的字典一并传给相机
             current_time = time.time() - start_time
-            camera_rec.record_frame(frame_id, current_time, current_poses[0])
+            camera_rec.record_frame(frame_id, current_time, current_poses)
 
             if frame_id % 15 == 0:
                 print(f"▶️ 进度: {progress_t * 100:.1f}% | 帧: {frame_id}/{TOTAL_FRAMES} | 耗时: {current_time:.2f}s")
