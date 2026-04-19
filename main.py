@@ -1,8 +1,8 @@
 import airsim
 import time
 import random
-import argparse  # <--- 新增：用于解析命令行参数
-import cv2  # <--- 新增：用于视频抽帧
+import argparse
+import cv2
 import os
 import re
 from trajectory_control import MissileController
@@ -10,19 +10,24 @@ from camera_control import CameraRecorder
 
 # ================= ⚙️ 蜂群(多导弹)全局配置 =================
 SAVE_DIR = "H:/Missile_Video_Dataset"
-PIC_SAVE_DIR = "H:/Missile_Picture_Dataset"  # <--- 新增：截图根目录
+PIC_SAVE_DIR = "H:/Missile_Picture_Dataset"
 
-TOTAL_FRAMES = 180  # 总帧数 (录制 3 秒)
 RECORD_RATE = 0.0167  # ≈ 60 FPS
+# 因为最大延迟3秒 + 最大飞行时长4秒 = 最多飞7秒。7秒 * 60FPS = 420帧
+TOTAL_FRAMES = 420
 
-# 🎯 核心交汇点
+# 🎯 核心交汇点：现在仅作为摄像机“盯死”的目标点，导弹【不】会强行经过这里
 SHARED_TARGET_POS = [50, 10, -30]
 
-# 🚀 定义多枚导弹的阵列参数
+# 🚀 蜂群阵列：实现“盲盒式”错峰发射
+# delay使用 0.0~3.0 之间的随机数，保证发射时间绝不超3秒！
 MISSILES_CONFIG = [
-    {"name": "Missile_1", "start": [0, -15, -2], "end": [150, 20, -60]},
-    {"name": "Missile_2", "start": [0, 0, -10], "end": [150, 0, -50]},
-    {"name": "Missile_3", "start": [0, 15, -2], "end": [150, -20, -40]}
+    {"name": "Missile_1", "start": [0, -15, -2], "end": [150, 20, -60],
+     "delay": random.uniform(0.0, 3.0), "duration": random.uniform(2.5, 4.0)},
+    {"name": "Missile_2", "start": [0, 0, -10], "end": [150, 0, -50],
+     "delay": random.uniform(0.0, 3.0), "duration": random.uniform(2.5, 4.0)},
+    {"name": "Missile_3", "start": [0, 15, -2], "end": [150, -20, -40],
+     "delay": random.uniform(0.0, 3.0), "duration": random.uniform(2.5, 4.0)}
 ]
 
 
@@ -30,11 +35,9 @@ MISSILES_CONFIG = [
 
 def extract_frames(video_path, frame_interval):
     """全自动抽帧引擎"""
-    # 智能提取视频路径中的时间戳 (例如 20260414_114331)
     match = re.search(r"(\d{8}_\d{6})", video_path)
     time_str = match.group(1) if match else "UnknownTime"
 
-    # 动态生成输出文件夹并创建
     output_dir = os.path.join(PIC_SAVE_DIR, f"Images_{time_str}")
     os.makedirs(output_dir, exist_ok=True)
 
@@ -51,7 +54,6 @@ def extract_frames(video_path, frame_interval):
         if not ret:
             break
 
-        # 满足切片参数 i 的间隔就截图
         if frame_count % frame_interval == 0:
             filename = f"frame_{saved_count:04d}.jpg"
             cv2.imwrite(os.path.join(output_dir, filename), frame)
@@ -65,9 +67,7 @@ def extract_frames(video_path, frame_interval):
 
 
 def main():
-    # ====== 🚀 新增：命令行参数解析 ======
     parser = argparse.ArgumentParser(description="AirSim 蜂群导弹仿真与全自动产线")
-    # 切片参数 i：如果不输入 -i，默认为 0（表示不抽帧只录像）
     parser.add_argument("-i", "--interval", type=int, default=0, help="切片参数：每隔 i 帧自动截图 (默认 0: 不截图)")
     args = parser.parse_args()
 
@@ -86,12 +86,15 @@ def main():
 
     missile_controllers = []
     for cfg in MISSILES_CONFIG:
+        # ⚠️核心修复：去掉了旧版强制传入的 target_pos=SHARED_TARGET_POS，
+        # 并正确传入了随机的 launch_delay 和 flight_duration
         ctrl = MissileController(
             client=client,
             missile_name=cfg["name"],
             start_pos=cfg["start"],
-            target_pos=SHARED_TARGET_POS,
-            end_pos=cfg["end"]
+            end_pos=cfg["end"],
+            launch_delay=cfg["delay"],
+            flight_duration=cfg["duration"]
         )
         missile_controllers.append(ctrl)
 
@@ -113,19 +116,23 @@ def main():
 
         for frame_id in range(TOTAL_FRAMES):
             loop_start = time.time()
-            progress_t = frame_id / (TOTAL_FRAMES - 1)
+
+            # ⚠️核心修复：通过计算真实的“仿真世界秒数”来驱动导弹，从而使 delay 参数生效
+            simulated_time = frame_id * RECORD_RATE
 
             current_poses = {}
             for ctrl in missile_controllers:
-                pose = ctrl.update_pose(progress_t)
+                # 传入秒数，导弹内部代码会自己判断是否过了延迟发射时间
+                pose = ctrl.update_pose(simulated_time)
                 track_id = ctrl.missile_name.split('_')[-1]
                 current_poses[track_id] = pose
 
-            current_time = time.time() - start_time
-            camera_rec.record_frame(frame_id, current_time, current_poses)
+            actual_time_elapsed = time.time() - start_time
+            camera_rec.record_frame(frame_id, actual_time_elapsed, current_poses)
 
             if frame_id % 15 == 0:
-                print(f"▶️ 进度: {progress_t * 100:.1f}% | 帧: {frame_id}/{TOTAL_FRAMES} | 耗时: {current_time:.2f}s",
+                progress = frame_id / TOTAL_FRAMES * 100
+                print(f"▶️ 进度: {progress:.1f}% | 仿真时钟: {simulated_time:.2f}s | 帧: {frame_id}/{TOTAL_FRAMES}",
                       end="\r")
 
             elapsed = time.time() - loop_start
@@ -138,7 +145,6 @@ def main():
     except KeyboardInterrupt:
         print("\n🛑 用户手动中止。")
     finally:
-        # 第一步：关闭并保存视频（必须先关闭，释放文件占用）
         if 'camera_rec' in locals():
             camera_rec.close()
 
@@ -146,7 +152,6 @@ def main():
             print("-" * 50)
             print(f"🎬 多目标大片杀青！已保存至:\n👉 {final_video_path}")
 
-            # 第二步：检测是否有切片参数，直接热乎地开始抽帧！
             if args.interval > 0:
                 extract_frames(final_video_path, args.interval)
             print("-" * 50)
